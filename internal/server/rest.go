@@ -19,12 +19,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/lf-edge/ekuiper/internal/xsql"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gorilla/handlers"
@@ -177,6 +179,7 @@ func createRestServer(ip string, port int, needToken bool) *http.Server {
 	r.HandleFunc("/ruletest/{name}", testRuleStopHandler).Methods(http.MethodDelete)
 	r.HandleFunc("/ruleset/export", exportHandler).Methods(http.MethodPost)
 	r.HandleFunc("/ruleset/import", importHandler).Methods(http.MethodPost)
+	r.HandleFunc("/ruleset/import_replace", importReplaceHandler).Methods(http.MethodPost)
 	r.HandleFunc("/configs", configurationUpdateHandler).Methods(http.MethodPatch)
 	r.HandleFunc("/config/uploads", fileUploadHandler).Methods(http.MethodPost, http.MethodGet)
 	r.HandleFunc("/config/uploads/{name}", fileDeleteHandler).Methods(http.MethodDelete)
@@ -799,6 +802,143 @@ func validateRuleHandler(w http.ResponseWriter, r *http.Request) {
 type rulesetInfo struct {
 	Content  string `json:"content"`
 	FilePath string `json:"file"`
+}
+
+func importReplaceHandler(w http.ResponseWriter, r *http.Request) {
+	rsi := &rulesetInfo{}
+	err := json.NewDecoder(r.Body).Decode(rsi)
+	if err != nil {
+		handleError(w, err, "Invalid body: Error decoding json", logger)
+		return
+	}
+	if rsi.Content != "" && rsi.FilePath != "" {
+		handleError(w, errors.New("bad request"), "Invalid body: Cannot specify both content and file", logger)
+		return
+	} else if rsi.Content == "" && rsi.FilePath == "" {
+		handleError(w, errors.New("bad request"), "Invalid body: must specify content or file", logger)
+		return
+	}
+	content := []byte(rsi.Content)
+	if rsi.FilePath != "" {
+		reader, err := httpx.ReadFile(rsi.FilePath)
+		if err != nil {
+			handleError(w, err, "Fail to read file", logger)
+			return
+		}
+		defer reader.Close()
+		buf := new(bytes.Buffer)
+		_, err = io.Copy(buf, reader)
+		if err != nil {
+			handleError(w, err, "fail to convert file", logger)
+			return
+		}
+		content = buf.Bytes()
+	}
+	rules, counts, err := importReplace(content)
+	if err != nil {
+		handleError(w, nil, "Import ruleset error", logger)
+		return
+	}
+	infra.SafeRun(func() error {
+		for _, name := range rules {
+			rul, ee := ruleProcessor.GetRuleById(name)
+			if ee != nil {
+				logger.Error(ee)
+				continue
+			}
+			reply := recoverRule(rul)
+			if reply != "" {
+				logger.Error(reply)
+			}
+		}
+		return nil
+	})
+	fmt.Fprintf(w, "imported %d streams, %d tables and %d rules", counts[0], counts[1], counts[2])
+}
+
+func importReplace(content []byte) ([]string, []int, error) {
+	all := &processor.Ruleset{}
+	err := json.Unmarshal(content, all)
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid import file: %v", err)
+	}
+	counts := make([]int, 3)
+	// parse statement
+	for _, v := range all.Streams {
+		parser := xsql.NewParser(strings.NewReader(v))
+		_, err := xsql.Language.Parse(parser)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	// parse table
+	for _, v := range all.Tables {
+		parser := xsql.NewParser(strings.NewReader(v))
+		_, err := xsql.Language.Parse(parser)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	// parse rules
+	for k, v := range all.Rules {
+		_, err := ruleProcessor.GetRuleByJson(k, v)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	var rules []string
+
+	// replace streams
+	for k, v := range all.Streams {
+		_, e := streamProcessor.ExecReplaceStream(k, v, ast.TypeStream)
+		if e != nil {
+			conf.Log.Errorf("Fail to import stream %s(%s) with error: %v", k, v, e)
+		} else {
+			counts[0]++
+		}
+	}
+	// replace tables
+	for k, v := range all.Tables {
+		_, e := streamProcessor.ExecReplaceStream(k, v, ast.TypeTable)
+		if e != nil {
+			conf.Log.Errorf("Fail to import table %s(%s) with error: %v", k, v, e)
+		} else {
+			counts[1]++
+		}
+	}
+
+	// replace rules
+	for k, v := range all.Rules {
+		_, err := ruleProcessor.GetRuleJson(k)
+		if err == nil {
+			// the rule already exist, update
+			err = updateRule(k, v, false)
+			if err != nil {
+				conf.Log.Errorf("Fail to import rule %s(%s) with error: %v", k, v, err)
+				continue
+			}
+			// Update to db after validation
+			_, err = ruleProcessor.ExecUpdate(k, v)
+			if err != nil {
+				conf.Log.Errorf("Fail to import rule %s(%s) with error: %v", k, v, err)
+				continue
+			}
+			rules = append(rules, k)
+			counts[2]++
+
+		} else {
+			// not found, create
+			_, err2 := createRule(k, v)
+			if err2 != nil {
+				conf.Log.Errorf("Fail to import rule %s(%s) with error: %v", k, v, err2)
+			} else {
+				rules = append(rules, k)
+				counts[2]++
+			}
+		}
+	}
+
+	return rules, counts, nil
 }
 
 func importHandler(w http.ResponseWriter, r *http.Request) {

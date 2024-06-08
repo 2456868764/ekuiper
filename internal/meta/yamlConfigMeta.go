@@ -122,6 +122,23 @@ func delConfKey(configOperatorKey, confKey, language string) (err error) {
 	return nil
 }
 
+func clearConf(configOperatorKey, language string) (err error) {
+	ConfigManager.lock.Lock()
+	defer ConfigManager.lock.Unlock()
+
+	cfgOps, ok := ConfigManager.cfgOperators[configOperatorKey]
+	if !ok {
+		return fmt.Errorf(`%s%s`, getMsg(language, source, "not_found_plugin"), configOperatorKey)
+	}
+
+	cfgOps.ClearConfKeys()
+	err = cfgOps.SaveCfgToStorage()
+	if err != nil {
+		return fmt.Errorf(`%s%s.%v`, getMsg(language, source, "write_data_fail"), configOperatorKey, err)
+	}
+	return nil
+}
+
 func DelSourceConfKey(plgName, confKey, language string) (err error) {
 	defer func() {
 		if err != nil {
@@ -132,6 +149,18 @@ func DelSourceConfKey(plgName, confKey, language string) (err error) {
 	}()
 	configOperatorKey := fmt.Sprintf(SourceCfgOperatorKeyTemplate, plgName)
 	return delConfKey(configOperatorKey, confKey, language)
+}
+
+func ClearSource(plgName, language string) (err error) {
+	defer func() {
+		if err != nil {
+			if _, ok := err.(errorx.ErrorWithCode); !ok {
+				err = errorx.NewWithCode(errorx.ConfKeyError, err.Error())
+			}
+		}
+	}()
+	configOperatorKey := fmt.Sprintf(SourceCfgOperatorKeyTemplate, plgName)
+	return clearConf(configOperatorKey, language)
 }
 
 func DelSinkConfKey(plgName, confKey, language string) (err error) {

@@ -18,6 +18,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/lf-edge/ekuiper/pkg/agent"
+	"github.com/lf-edge/ekuiper/pkg/signals"
 	"net"
 	"net/http"
 	"os"
@@ -134,6 +136,18 @@ func StartUp(Version string) {
 	version = Version
 	startTimeStamp = time.Now().Unix()
 	createPaths()
+	// init coordinatorAgent
+	ctx := signals.SetupSignalHandler()
+	coordinatorAgent := agent.NewCoordinatorAgent()
+	err := coordinatorAgent.Init()
+	if err != nil {
+		logger.Errorf("can not init coordinatorAgent ,error:%v", err)
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+	// start coordinatorAgent
+	coordinatorAgent.Run(ctx.Done())
+
 	conf.InitConf()
 	factory.InitClientsFactory()
 

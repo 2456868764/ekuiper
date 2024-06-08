@@ -18,9 +18,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
-
 	"github.com/lf-edge/ekuiper/internal/conf"
+	"io"
 )
 
 type RulesetProcessor struct {
