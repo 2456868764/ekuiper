@@ -10,6 +10,20 @@ GO              := GO111MODULE=on go
 FAILPOINT_ENABLE  := find $$PWD/ -type d | grep -vE "(\.git|tools)" | xargs tools/failpoint/bin/failpoint-ctl enable
 FAILPOINT_DISABLE := find $$PWD/ -type d | grep -vE "(\.git|tools)" | xargs tools/failpoint/bin/failpoint-ctl disable
 
+# Images management
+REGISTRY ?= registry.cn-hangzhou.aliyuncs.com
+REGISTRY_NAMESPACE?= 2456868764
+REGISTRY_USER_NAME?=""
+REGISTRY_PASSWORD?=""
+
+## docker buildx support platform
+PLATFORMS ?= linux/arm64,linux/amd64
+
+# Image URL to use all building/pushing image targets
+GIT_VERSION ?= $(shell git describe --tags --always)
+EKUIPERD_IMG ?= ${REGISTRY}/${REGISTRY_NAMESPACE}/ekuiperd:${GIT_VERSION}
+
+
 TARGET ?= lfedge/ekuiper
 
 export KUIPER_SOURCE := $(shell pwd)
@@ -150,12 +164,47 @@ build_with_wasm: build_prepare
 	@echo "Build successfully"
 
 
+.PHONY: build-kuiperd
+build-kuiperd:
+	@rm -f -R deploy/docker/_build
+	@mkdir -p deploy/docker/_build/bin
+	@mkdir -p deploy/docker/_build/etc
+	@mkdir -p deploy/docker/_build/etc/sources
+	@mkdir -p deploy/docker/_build/etc/sinks
+	@mkdir -p deploy/docker/_build/etc/services
+	@mkdir -p deploy/docker/_build/etc/services/schemas
+	@mkdir -p deploy/docker/_build/data
+	@mkdir -p deploy/docker/_build/plugins
+	@mkdir -p deploy/docker/_build/plugins/sources
+	@mkdir -p deploy/docker/_build/plugins/sinks
+	@mkdir -p deploy/docker/_build/plugins/functions
+	@mkdir -p deploy/docker/_build/plugins/portable
+	@mkdir -p deploy/docker/_build/plugins/wasm
+	@mkdir -p deploy/docker/_build/log
+
+	@cp -r etc.b/* deploy/docker/_build/etc
+
+	GO111MODULE=on CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X github.com/lf-edge/ekuiper/cmd.Version=$(VERSION) -X github.com/lf-edge/ekuiper/cmd.LoadFileType=relative" -tags "full include_nats_messaging" -o deploy/docker/amd64/kuiperd cmd/kuiperd/main.go
+	GO111MODULE=on CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w -X github.com/lf-edge/ekuiper/cmd.Version=$(VERSION) -X github.com/lf-edge/ekuiper/cmd.LoadFileType=relative" -tags "full include_nats_messaging" -o deploy/docker/arm64/kuiperd cmd/kuiperd/main.go
+
+.PHONY: image-buildx-ekuiperd
+image-buildx-ekuiperd: build-kuiperd  ## Build and push docker image for the dubbo client for cross-platform support
+	# copy existing Dockerfile and insert --platform=${BUILDPLATFORM} into Dockerfile.cross, and preserve the original Dockerfile
+
+	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' deploy/docker/Dockerfile-kuiperd > deploy/docker/Dockerfile.cross
+	- docker buildx create --name project-client-builder
+	docker buildx use project-client-builder
+	- docker buildx build --build-arg --push --output=type=registry --platform=$(PLATFORMS) --tag ${EKUIPERD_IMG} -f deploy/docker/Dockerfile.cross deploy/docker
+	- docker buildx rm project-client-builder
+	rm deploy/docker/Dockerfile.cross && rm -f -R deploy/docker/arm64/ &&  rm -f -R deploy/docker/amd64/ &&  rm -f -R deploy/docker/_build
+
+
 .PHONY: docker
 docker:
-	#docker buildx build --no-cache --platform=linux/amd64 -t $(TARGET):$(VERSION) -f deploy/docker/Dockerfile . --load
-	#docker buildx build --no-cache --platform=linux/amd64 -t $(TARGET):$(VERSION)-slim -f deploy/docker/Dockerfile-slim . --load
+	docker buildx build --no-cache --platform=linux/amd64 -t $(TARGET):$(VERSION) -f deploy/docker/Dockerfile . --load
+	docker buildx build --no-cache --platform=linux/amd64 -t $(TARGET):$(VERSION)-slim -f deploy/docker/Dockerfile-slim . --load
 	docker buildx build --no-cache --platform=linux/amd64 -t $(TARGET):$(VERSION)-full -f deploy/docker/Dockerfile-full . --load
-	#docker buildx build --no-cache --platform=linux/amd64 -t $(TARGET):$(VERSION)-dev -f deploy/docker/Dockerfile-dev . --load
+	docker buildx build --no-cache --platform=linux/amd64 -t $(TARGET):$(VERSION)-dev -f deploy/docker/Dockerfile-dev . --load
 
 PLUGINS := sinks/influx \
 	sinks/influx2 \
